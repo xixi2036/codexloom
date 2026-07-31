@@ -17,6 +17,7 @@ import { WorkspaceErrorBoundary, WorkspaceReady } from "./workspace-recovery";
 import { moveItem, reorderItem, type DropEdge } from "./tab-order";
 import type { OverviewSection } from "./OverviewPane";
 import type { SettingsSection } from "./SettingsPane";
+import { agentLabel } from "./agent-label";
 
 const AgentPane = lazy(() => import("./AgentPane").then((module) => ({ default: module.AgentPane })));
 const InboxPane = lazy(() => import("./InboxPane").then((module) => ({ default: module.InboxPane })));
@@ -26,6 +27,11 @@ const SchedulesPane = lazy(() => import("./SchedulesPane").then((module) => ({ d
 const TeamPane = lazy(() => import("./TeamPane").then((module) => ({ default: module.TeamPane })));
 const OverviewPane = lazy(() => import("./OverviewPane").then((module) => ({ default: module.OverviewPane })));
 const SettingsPane = lazy(() => import("./SettingsPane").then((module) => ({ default: module.SettingsPane })));
+
+function createInternalAgentName() {
+  const suffix = Math.random().toString(36).slice(2, 10).padEnd(8, "0");
+  return `agent-${suffix}`;
+}
 
 function WorkbenchFallback() {
   return (
@@ -184,7 +190,7 @@ function AgentActivityPopover({
               >
                 <span className="mt-1 size-2 shrink-0 rounded-full bg-success ring-2 ring-success/15" />
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-[11.5px] font-semibold">{agent.name}</span>
+                  <span className="block truncate text-[11.5px] font-semibold">{agentLabel(agent)}</span>
                   <span className="mt-0.5 block truncate text-[10px] text-muted-foreground" title={task}>{task}</span>
                 </span>
                 <ChevronRight className="mt-0.5 size-3.5 shrink-0 text-muted-foreground/60" />
@@ -447,10 +453,10 @@ function AgentTabs({
                   event.preventDefault();
                   onMove(agent.id, event.key === "ArrowLeft" ? -1 : 1);
                 }}
-                title={`${agent.name}\n${agent.cwd}${interruptedAgentTitle(agent) ? `\n${interruptedAgentTitle(agent)}` : ""}${shortcutNumber ? `\nSwitch: Ctrl/Option+${shortcutNumber}` : ""}\nReorder: drag or Alt+Shift+Arrow`}
+                title={`${agentLabel(agent)}\n${agent.name}\n${agent.cwd}${interruptedAgentTitle(agent) ? `\n${interruptedAgentTitle(agent)}` : ""}${shortcutNumber ? `\nSwitch: Ctrl/Option+${shortcutNumber}` : ""}\nReorder: drag or Alt+Shift+Arrow`}
               >
                 {agent.status === "interrupted" ? <CirclePause className="size-3.5 shrink-0 text-warning" aria-label="Interrupted by restart" /> : <span className={`size-1.5 shrink-0 rounded-full ${isAgentWorking(agent) ? `animate-pulse ${executionDotClass(agent)}` : unseen ? "bg-ring ring-2 ring-ring/15" : executionDotClass(agent)}`} />}
-                <span className={`truncate text-[11.5px] ${active ? "font-semibold" : "font-medium"}`}>{agent.name}</span>
+                <span className={`truncate text-[11.5px] ${active ? "font-semibold" : "font-medium"}`}>{agentLabel(agent)}</span>
                 {needsYou > 0 ? <span className="flex min-w-4 shrink-0 items-center justify-center rounded-sm bg-warning/15 px-1 font-mono text-[8px] font-semibold text-warning" title={`${needsYou} request${needsYou === 1 ? "" : "s"} need your input`}>{needsYou}</span> : null}
                 {inbox > 0 ? <span className="flex min-w-4 shrink-0 items-center justify-center rounded-sm bg-muted px-1 font-mono text-[8px] font-semibold text-muted-foreground" title={`${inbox} Agent Inbox item${inbox === 1 ? "" : "s"}`}>{inbox}</span> : null}
               </button>
@@ -461,15 +467,15 @@ function AgentTabs({
                   delay={250}
                   closeDelay={180}
                   className={`flex size-6 shrink-0 items-center justify-center rounded-sm outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring/40 ${active ? "text-muted-foreground" : "text-muted-foreground/0 group-hover:text-muted-foreground group-focus-within:text-muted-foreground"}`}
-                  title={`About ${agent.name}`}
-                  aria-label={`About ${agent.name}`}
+                  title={`About ${agentLabel(agent)}`}
+                  aria-label={`About ${agentLabel(agent)}`}
                 >
                   <Info className="size-3" />
                 </PopoverTrigger>
                 <PopoverContent align="start" className="w-[min(22rem,calc(100vw-1rem))]">
                   <div className="flex items-center gap-2">
                     <span className={`size-2 shrink-0 rounded-full ${executionDotClass(agent)}`} />
-                    <div className="min-w-0 flex-1 truncate text-[12px] font-semibold">{agent.name}</div>
+                    <div className="min-w-0 flex-1 truncate text-[12px] font-semibold">{agentLabel(agent)}</div>
                     <span className="font-mono text-[9px] uppercase text-muted-foreground">{agentRuntimeLabel(agent)}</span>
                   </div>
                   <dl className="mt-3 grid grid-cols-[58px_minmax(0,1fr)] gap-x-2 gap-y-2 text-[10.5px]">
@@ -492,8 +498,8 @@ function AgentTabs({
                 data-tab-action
                 onClick={() => onClose(agent.id)}
                 className={`mr-1 flex size-6 shrink-0 items-center justify-center rounded-sm outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring/40 ${active || unseen ? "text-muted-foreground" : "text-muted-foreground/0 group-hover:text-muted-foreground"}`}
-                title={`Close ${agent.name} tab`}
-                aria-label={`Close ${agent.name} tab`}
+                title={`Close ${agentLabel(agent)} tab`}
+                aria-label={`Close ${agentLabel(agent)} tab`}
               >
                 <X className="size-3" />
               </button>
@@ -564,7 +570,8 @@ export default function App() {
   const [topicCreateRequest, setTopicCreateRequest] = useState<{ agentId?: string; nonce: number } | null>(null);
   const [configRequest, setConfigRequest] = useState<{ agentId: string; nonce: number } | null>(null);
   const [archivingAgentIds, setArchivingAgentIds] = useState<Set<string>>(() => new Set());
-  const [newName, setNewName] = useState("");
+  const [newName, setNewName] = useState(createInternalAgentName);
+  const [newDisplayName, setNewDisplayName] = useState("");
   const [newCwd, setNewCwd] = useState("");
   const [newDomain, setNewDomain] = useState("");
   const [creatingAgent, setCreatingAgent] = useState(false);
@@ -703,6 +710,7 @@ export default function App() {
                   ? {
                       ...s,
                       name: d.name ?? s.name,
+                      displayName: d.displayName ?? s.displayName,
                       cwd: d.cwd ?? s.cwd,
                       threadId: d.threadId ?? s.threadId,
                       status: d.status,
@@ -744,8 +752,8 @@ export default function App() {
 
   const create = async () => {
     if (creatingAgent) return;
-    if (!newName.trim() || !newCwd.trim()) {
-      showToast("name and cwd required");
+    if (!newDisplayName.trim() || !newName.trim() || !newCwd.trim()) {
+      showToast("display name, internal identifier, and cwd required");
       return;
     }
     if (!newCwd.trim().startsWith("/")) {
@@ -754,11 +762,12 @@ export default function App() {
     }
     setCreatingAgent(true);
     try {
-      const data = await api("POST", "/api/agents", { name: newName.trim(), cwd: newCwd.trim() });
+      const data = await api("POST", "/api/agents", { name: newName.trim(), displayName: newDisplayName.trim(), cwd: newCwd.trim() });
       if (newDomain.trim()) {
         await api("PUT", `/api/agents/${encodeURIComponent(data.agent.id)}/profile`, { identity: "", domain: newDomain.trim(), scope: "", expectedVersion: 0 });
       }
-      setNewName("");
+      setNewName(createInternalAgentName());
+      setNewDisplayName("");
       setNewCwd("");
       setNewDomain("");
       setNewAgentOpen(false);
@@ -770,12 +779,16 @@ export default function App() {
         return next;
       });
       setCurrent(data.agent.id);
-	  setView("agents");
+      setView("agents");
     } catch (err: any) {
       showToast(err.message);
     } finally {
       setCreatingAgent(false);
     }
+  };
+
+  const openNewAgent = () => {
+    setNewAgentOpen(true);
   };
 
   const restartLoom = async () => {
@@ -991,7 +1004,7 @@ export default function App() {
 
   const archiveAgent = async (agent: Agent) => {
     if (archivingAgentIds.has(agent.id)) return;
-    if (!confirm(`archive agent "${agent.name}" and its Codex thread?`)) return;
+    if (!confirm(`archive agent "${agentLabel(agent)}" and its Codex thread?`)) return;
     setArchivingAgentIds((ids) => new Set(ids).add(agent.id));
     try {
       await api("DELETE", `/api/agents/${agent.id}`);
@@ -1326,7 +1339,7 @@ export default function App() {
       document.title = `${attention}Settings · CodexLoom`;
     } else if (selected) {
       const marker = isAgentWorking(selected) ? "● " : selected.lastError ? "! " : "";
-      document.title = `${attention}${marker}${selected.name} · CodexLoom`;
+      document.title = `${attention}${marker}${agentLabel(selected)} · CodexLoom`;
     } else if (activeCount > 0) {
       document.title = `(${activeCount}) CodexLoom`;
     } else {
@@ -1419,7 +1432,7 @@ export default function App() {
                     className="h-8 min-w-0 flex-1 justify-start overflow-hidden bg-transparent px-2.5 text-left hover:bg-transparent hover:text-inherit"
                   >
                     {s.status === "interrupted" ? <CirclePause className="size-3.5 shrink-0 text-warning" aria-label="Interrupted by restart" /> : <span className={`size-2 shrink-0 rounded-full ${isAgentWorking(s) ? "pulse" : ""} ${executionDotClass(s)}`} />}
-                    <span className={`min-w-0 flex-1 truncate text-[12.5px] ${active ? "font-semibold" : "font-medium"}`}>{s.name}</span>
+                    <span className={`min-w-0 flex-1 truncate text-[12.5px] ${active ? "font-semibold" : "font-medium"}`}>{agentLabel(s)}</span>
                     {unseenAgentIds.has(s.id) ? <span className="size-1.5 shrink-0 rounded-full bg-ring" title="New result from Owner-started work" /> : null}
                     {inboxCount > 0 ? <span className="shrink-0 font-mono text-[8.5px] text-muted-foreground" title={`${inboxCount} Agent Inbox items`}>{inboxCount}</span> : null}
                   </Button>
@@ -1430,8 +1443,8 @@ export default function App() {
                     disabled={archiving}
                     tabIndex={active ? 0 : -1}
                     className={`mr-1 flex size-6 shrink-0 items-center justify-center rounded-sm text-muted-foreground outline-none transition hover:bg-destructive/10 hover:text-destructive focus-visible:ring-2 focus-visible:ring-destructive/30 disabled:opacity-50 ${active ? "visible opacity-70" : "invisible opacity-0 group-hover/agent:visible group-hover/agent:opacity-70 group-focus-within/agent:visible group-focus-within/agent:opacity-70"}`}
-                    title={`Archive ${s.name}`}
-                    aria-label={`Archive ${s.name}`}
+                    title={`Archive ${agentLabel(s)}`}
+                    aria-label={`Archive ${agentLabel(s)}`}
                   >
                     <Archive className={`size-3 ${archiving ? "animate-pulse" : ""}`} />
                   </button>
@@ -1447,7 +1460,7 @@ export default function App() {
         </section>
 
         <div className="grid shrink-0 grid-cols-[1fr_auto_auto_auto] gap-1 border-t border-sidebar-border/80 bg-sidebar/90 p-2">
-          <Button onClick={() => setNewAgentOpen(true)} title={t("shell.createTitle")}>
+          <Button onClick={openNewAgent} title={t("shell.createTitle")}>
             <Plus />
             <span>{t("shell.newAgent")}</span>
           </Button>
@@ -1480,8 +1493,13 @@ export default function App() {
           </DialogHeader>
           <div className="space-y-3">
             <label className="block space-y-1.5 text-[11px] font-medium text-muted-foreground">
-              {t("shell.agentName")}
-              <Input value={newName} onChange={(event) => setNewName(event.target.value)} placeholder="codex-research" spellCheck={false} />
+              {t("shell.displayName")}
+              <Input value={newDisplayName} onChange={(event) => setNewDisplayName(event.target.value)} placeholder={t("shell.displayNamePlaceholder")} />
+            </label>
+            <label className="block space-y-1.5 text-[11px] font-medium text-muted-foreground">
+              {t("shell.internalName")}
+              <Input value={newName} onChange={(event) => setNewName(event.target.value)} placeholder="agent-a1b2c3d4" spellCheck={false} className="font-mono text-[12px]" />
+              <span className="block text-[10px] font-normal leading-4 text-muted-foreground/75">{t("shell.internalNameHelp")}</span>
             </label>
             <label className="block space-y-1.5 text-[11px] font-medium text-muted-foreground">
               {t("shell.workingDirectory")}

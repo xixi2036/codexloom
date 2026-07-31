@@ -1,6 +1,7 @@
 import { CalendarClock, Pause, Play, Plus, RotateCw, Trash2, Zap } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api, type Schedule, type Agent } from "./types";
+import { agentLabel } from "./agent-label";
 
 interface Props {
   agents: Agent[];
@@ -184,7 +185,7 @@ export function SchedulesPane({ agents, onError, initialTo }: Props) {
                   <option value="">select</option>
                   {agents.map((s) => (
                     <option key={s.id} value={s.name}>
-                      {s.name}
+                      {agentLabel(s)}
                     </option>
                   ))}
                 </select>
