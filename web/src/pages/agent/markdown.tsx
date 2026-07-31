@@ -68,7 +68,7 @@ export function MarkdownContent({ content, streaming = false, className }: { con
   };
 
   return (
-    <div className={cn("max-w-none break-words prose", className)}>
+    <div data-i18n-preserve className={cn("max-w-none break-words prose", className)}>
       <Streamdown
         plugins={plugins}
         rehypePlugins={customRehypePlugins}

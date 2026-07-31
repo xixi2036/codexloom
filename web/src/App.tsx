@@ -1,6 +1,7 @@
-import { Activity, Archive, BookOpen, Bot, Cable, ChevronRight, CircleHelp, CirclePause, Inbox as InboxIcon, Info, Menu, Network, PanelLeftClose, PanelLeftOpen, Plus, RotateCw, Settings2, X } from "lucide-react";
+import { Activity, Archive, BookOpen, Bot, Cable, ChevronRight, CircleHelp, CirclePause, Inbox as InboxIcon, Info, Languages, Menu, Network, PanelLeftClose, PanelLeftOpen, Plus, RotateCw, Settings2, X } from "lucide-react";
 import { lazy, Suspense, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import { api, type Agent, type BackupStatus, type HumanRequest, type InboxEntry, type RemoteSnapshot, type Topic } from "./types";
 import { summarizeTask } from "./feed";
 import { BrandLockup, BrandMark } from "./components/BrandMark";
@@ -508,6 +509,7 @@ function AgentTabs({
 }
 
 export default function App() {
+  const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
   const agentsQuery = useQuery<{ agents: Agent[] }>({
     queryKey: ["agents"],
@@ -1379,18 +1381,18 @@ export default function App() {
 
         <nav className="px-2 pb-2" aria-label="Workspace">
           <div className="space-y-0.5">
-            <SidebarNavItem label="Needs You" icon={CircleHelp} active={view === "needs-you"} compact={false} onSelect={() => selectNeedsYou()} count={openHumanRequests.length} />
-            <SidebarNavItem label="Topics" icon={BookOpen} active={view === "topics"} compact={false} onSelect={() => selectTopics()} count={topicAttentionCount} />
-            <SidebarNavItem label="Overview" icon={Activity} active={view === "status" || view === "capacity" || view === "usage"} compact={false} onSelect={() => selectOverview()} />
-            <SidebarNavItem label="Team" icon={Network} active={view === "team" || view === "messages"} compact={false} onSelect={selectTeam} />
-            <SidebarNavItem label="External" icon={Cable} active={view === "integrations"} compact={false} onSelect={selectIntegrations} />
+            <SidebarNavItem label={t("shell.needsYou")} icon={CircleHelp} active={view === "needs-you"} compact={false} onSelect={() => selectNeedsYou()} count={openHumanRequests.length} />
+            <SidebarNavItem label={t("shell.topics")} icon={BookOpen} active={view === "topics"} compact={false} onSelect={() => selectTopics()} count={topicAttentionCount} />
+            <SidebarNavItem label={t("shell.overview")} icon={Activity} active={view === "status" || view === "capacity" || view === "usage"} compact={false} onSelect={() => selectOverview()} />
+            <SidebarNavItem label={t("shell.team")} icon={Network} active={view === "team" || view === "messages"} compact={false} onSelect={selectTeam} />
+            <SidebarNavItem label={t("shell.external")} icon={Cable} active={view === "integrations"} compact={false} onSelect={selectIntegrations} />
           </div>
         </nav>
 
-        <section className="mx-2 mt-1 flex min-h-0 flex-1 flex-col overflow-hidden rounded-t-md bg-background/45" aria-label="Agents">
+        <section className="mx-2 mt-1 flex min-h-0 flex-1 flex-col overflow-hidden rounded-t-md bg-background/45" aria-label={t("shell.agents")}>
           <div className="flex h-8 shrink-0 items-center gap-2 px-2.5 text-muted-foreground">
             <Bot className="size-3" />
-            <span className="text-[9px] font-bold uppercase">Agents</span>
+            <span className="text-[9px] font-bold uppercase">{t("shell.agents")}</span>
             <span className="ml-auto font-mono text-[9px] text-muted-foreground/60">{agents.length}</span>
           </div>
 
@@ -1438,18 +1440,21 @@ export default function App() {
             })}
             {agents.length === 0 && (
               <div className="px-3 py-6 text-center text-[12px] text-muted-foreground/50">
-                No agents yet.
+                {t("shell.empty")}
               </div>
             )}
           </div>
         </section>
 
-        <div className="grid shrink-0 grid-cols-[1fr_auto_auto] gap-1 border-t border-sidebar-border/80 bg-sidebar/90 p-2">
-          <Button onClick={() => setNewAgentOpen(true)} title="Create agent">
+        <div className="grid shrink-0 grid-cols-[1fr_auto_auto_auto] gap-1 border-t border-sidebar-border/80 bg-sidebar/90 p-2">
+          <Button onClick={() => setNewAgentOpen(true)} title={t("shell.createTitle")}>
             <Plus />
-            <span>New agent</span>
+            <span>{t("shell.newAgent")}</span>
           </Button>
-          <Button variant="outline" size="icon" onClick={() => selectSettings()} title="Settings" aria-label="Settings">
+          <Button variant="outline" size="icon" onClick={() => void i18n.changeLanguage(i18n.resolvedLanguage === "en" ? "zh-CN" : "en")} title={t("shell.switchLanguage")} aria-label={t("shell.switchLanguage")}>
+            <Languages />
+          </Button>
+          <Button variant="outline" size="icon" onClick={() => selectSettings()} title={t("shell.settings")} aria-label={t("shell.settings")}>
             {restartPending ? <RotateCw className="animate-spin text-warning" /> : <Settings2 />}
           </Button>
           <Button
@@ -1470,25 +1475,25 @@ export default function App() {
       <Dialog open={newAgentOpen} onOpenChange={setNewAgentOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Create agent</DialogTitle>
-            <DialogDescription>Create a long-lived domain agent backed by a Codex Thread.</DialogDescription>
+            <DialogTitle>{t("shell.createTitle")}</DialogTitle>
+            <DialogDescription>{t("shell.createDescription")}</DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
             <label className="block space-y-1.5 text-[11px] font-medium text-muted-foreground">
-              Agent name
+              {t("shell.agentName")}
               <Input value={newName} onChange={(event) => setNewName(event.target.value)} placeholder="codex-research" spellCheck={false} />
             </label>
             <label className="block space-y-1.5 text-[11px] font-medium text-muted-foreground">
-              Working directory
+              {t("shell.workingDirectory")}
               <Input value={newCwd} onChange={(event) => setNewCwd(event.target.value)} placeholder="/absolute/path/to/workspace" spellCheck={false} className="font-mono text-[12px]" />
             </label>
             <label className="block space-y-1.5 text-[11px] font-medium text-muted-foreground">
-              Domain <span className="font-normal text-muted-foreground/70">optional</span>
-              <textarea value={newDomain} onChange={(event) => setNewDomain(event.target.value)} placeholder="The enduring subject this Agent will maintain" rows={3} className="w-full resize-y rounded-sm border border-input bg-background px-3 py-2 text-[12px] leading-5 outline-none focus:border-ring focus:ring-2 focus:ring-ring/15" />
+              {t("shell.domain")} <span className="font-normal text-muted-foreground/70">{t("shell.optional")}</span>
+              <textarea value={newDomain} onChange={(event) => setNewDomain(event.target.value)} placeholder={t("shell.domainPlaceholder")} rows={3} className="w-full resize-y rounded-sm border border-input bg-background px-3 py-2 text-[12px] leading-5 outline-none focus:border-ring focus:ring-2 focus:ring-ring/15" />
             </label>
           </div>
           <DialogFooter showCloseButton>
-            <Button onClick={create} disabled={creatingAgent}>{creatingAgent ? <span className="spinner size-3" /> : <Plus />}{creatingAgent ? "Creating" : "Create agent"}</Button>
+            <Button onClick={create} disabled={creatingAgent}>{creatingAgent ? <span className="spinner size-3" /> : <Plus />}{creatingAgent ? t("shell.creating") : t("shell.create")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
