@@ -20,6 +20,7 @@ export interface Agent {
   threadId: string;
   sandbox: string;
   approvalPolicy: string;
+  providerId?: string;
   model?: string;
   effort?: string;
   status: string;
@@ -38,6 +39,53 @@ export interface Agent {
   pendingApprovals: Approval[];
   goal?: ThreadGoal;
   lastSeq: number;
+}
+
+export interface ModelProvider {
+  id: string;
+  name: string;
+  baseUrl?: string;
+  wireApi?: string;
+  source: "builtin" | "custom" | "missing" | string;
+  configured: boolean;
+  credentialSource: "codex-auth" | "toml" | "environment" | "command" | "missing" | string;
+  credentialConfigured: boolean;
+  models: string[];
+  modelDetails: ModelCatalogModel[];
+  boundAgentCount: number;
+  publicBeta?: boolean;
+  textOnly?: boolean;
+  limitations?: string[];
+}
+
+export interface ModelCatalogModel {
+  id: string;
+  displayName: string;
+  providerId: string;
+  contextWindow?: number;
+  maxContextWindow?: number;
+  reasoningEfforts: string[];
+  defaultReasoningEffort?: string;
+  inputModalities?: string[];
+  visible: boolean;
+}
+
+export interface ModelCatalogStatus {
+  source: "managed" | "override" | string;
+  version: string;
+  sha256: string;
+  codexBaseline: string;
+  codexVersion?: string;
+  compatibility: "verified" | "unverified" | "unsupported" | string;
+  modelCount: number;
+  models: ModelCatalogModel[];
+  applied: boolean;
+  restartRequired: boolean;
+}
+
+export interface ModelProviderResponse {
+  providers: ModelProvider[];
+  catalog: ModelCatalogStatus;
 }
 
 export interface ThreadArtifact {
@@ -526,6 +574,7 @@ export interface UsageDay {
 }
 
 export interface UsageModel {
+  providerId: string;
   model: string;
   usage: TokenUsage;
 }
@@ -541,6 +590,7 @@ export interface AgentTokenUsage {
   previous: TokenUsage;
   today: TokenUsage;
   latestCall: TokenUsage;
+  latestProviderId?: string;
   latestModel?: string;
   cacheHitPercent: number;
   context: {
@@ -790,6 +840,26 @@ export interface Topic {
   ownerSeenBriefVersion?: number;
   version: number;
   createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt?: string;
+  needsMeCount: number;
+  resultsReady: boolean;
+  activeTurns: TopicActiveTurn[];
+}
+
+export interface TopicSummary {
+  id: string;
+  title: string;
+  purpose?: string;
+  status: TopicStatus;
+  responsibleAgentId: string;
+  responsibleAgent: string;
+  currentBrief: TopicBrief;
+  waitingOn?: TopicWaitingOn;
+  resultReadyVersion?: number;
+  ownerSeenBriefVersion?: number;
+  version: number;
   createdAt: string;
   updatedAt: string;
   resolvedAt?: string;

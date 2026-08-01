@@ -1,16 +1,17 @@
-import { Archive, Cable, Check, Code2, Copy, DatabaseBackup, ExternalLink, GitBranch, KeyRound, Loader2, RadioTower, RotateCw, Settings2 } from "lucide-react";
+import { Archive, Cable, Check, Code2, Copy, Cpu, DatabaseBackup, ExternalLink, GitBranch, KeyRound, Loader2, Plus, RadioTower, RotateCw, Save, Settings2, ShieldCheck, Trash2 } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { DesignPane } from "./DesignPane";
 import { RemotePane } from "./RemotePane";
-import { api, type BackupStatus, type GitHubDeviceFlow, type PlatformConnection, type RemoteSnapshot } from "./types";
+import { api, type BackupStatus, type GitHubDeviceFlow, type ModelProvider, type ModelProviderResponse, type PlatformConnection, type RemoteSnapshot } from "./types";
 import { Button } from "./components/ui/button";
 import { Input } from "./components/ui/input";
 
-export type SettingsSection = "remote" | "connectors" | "recovery" | "system" | "developer";
+export type SettingsSection = "remote" | "providers" | "connectors" | "recovery" | "system" | "developer";
 
 const sections: Array<{ id: SettingsSection; label: string; icon: typeof Settings2 }> = [
   { id: "remote", label: "Codex & Remote", icon: RadioTower },
+  { id: "providers", label: "Model Providers", icon: Cpu },
   { id: "connectors", label: "Connectors", icon: Cable },
   { id: "recovery", label: "Data & Recovery", icon: DatabaseBackup },
   { id: "system", label: "System", icon: Settings2 },
@@ -61,6 +62,7 @@ export function SettingsPane({ section, remote, backupStatus, backingUp, restart
         </nav>
         <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
           {section === "remote" ? <RemotePane remote={remote} onUpdated={onRemoteUpdated} onError={onError} embedded /> : null}
+          {section === "providers" ? <ProviderSettings onError={onError} /> : null}
           {section === "connectors" ? <ConnectorSettings onOpenExternal={onOpenExternal} onError={onError} /> : null}
           {section === "recovery" ? <RecoverySettings status={backupStatus} backingUp={backingUp} onBackup={onBackup} /> : null}
           {section === "system" ? <SystemSettings restarting={restarting} restartStatus={restartStatus} onRestart={onRestart} /> : null}
@@ -69,6 +71,143 @@ export function SettingsPane({ section, remote, backupStatus, backingUp, restart
       </div>
     </main>
   );
+}
+
+function ProviderSettings({ onError }: { onError: (message: string) => void }) {
+  const queryClient = useQueryClient();
+  const query = useQuery<ModelProviderResponse>({ queryKey: ["model-providers"], queryFn: () => api("GET", "/api/model-providers") });
+  const providers = query.data?.providers || [];
+  const catalog = query.data?.catalog;
+  const visibleModels = catalog?.models.filter((model) => model.visible) || [];
+  const [editing, setEditing] = useState(false);
+  const [providerId, setProviderId] = useState("deepseek");
+  const [name, setName] = useState("DeepSeek");
+  const [baseUrl, setBaseUrl] = useState("https://api.deepseek.com");
+  const [wireApi, setWireApi] = useState("responses");
+  const [apiKey, setApiKey] = useState("");
+  const [envKey, setEnvKey] = useState("");
+  const [working, setWorking] = useState(false);
+  const [verification, setVerification] = useState<Record<string, string> | null>(null);
+
+  const editProvider = (provider?: ModelProvider) => {
+    if (provider) {
+      setProviderId(provider.id);
+      setName(provider.name);
+      setBaseUrl(provider.baseUrl || "");
+      setWireApi(provider.wireApi || "responses");
+    } else {
+      setProviderId("deepseek");
+      setName("DeepSeek");
+      setBaseUrl("https://api.deepseek.com");
+      setWireApi("responses");
+    }
+    setApiKey("");
+    setEnvKey("");
+    setVerification(null);
+    setEditing(true);
+  };
+
+  const save = async () => {
+    if (!providerId.trim() || !name.trim() || !baseUrl.trim() || !wireApi.trim()) return;
+    setWorking(true);
+    try {
+      await api("PUT", `/api/model-providers/${encodeURIComponent(providerId.trim())}`, {
+        name: name.trim(), baseUrl: baseUrl.trim(), wireApi: wireApi.trim(),
+        apiKey: apiKey.trim(), envKey: envKey.trim(),
+      });
+      setApiKey("");
+      setEnvKey("");
+      setEditing(false);
+      await queryClient.invalidateQueries({ queryKey: ["model-providers"] });
+    } catch (error) {
+      onError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const verify = async (id: string) => {
+    setWorking(true);
+    try {
+      const data = await api("POST", `/api/model-providers/${encodeURIComponent(id)}/verify`, {}) as { verification: Record<string, string> };
+      setVerification(data.verification);
+      setProviderId(id);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const disable = async (id: string) => {
+    setWorking(true);
+    try {
+      await api("DELETE", `/api/model-providers/${encodeURIComponent(id)}`);
+      await queryClient.invalidateQueries({ queryKey: ["model-providers"] });
+    } catch (error) {
+      onError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  return <SettingsBody title="Model Providers" description="Provider credentials stay in Codex configuration; the shared runtime reads model capabilities from one managed catalog.">
+    <div className="flex items-center justify-between border-y border-border py-3">
+      <div className="flex items-center gap-2"><DatabaseBackup className="size-4 text-primary" /><span className="text-[12px] font-semibold">Runtime model catalog</span></div>
+      {catalog ? <span className={`font-mono text-[9px] uppercase ${catalog.compatibility === "verified" && catalog.applied ? "text-success" : catalog.compatibility === "unsupported" ? "text-destructive" : "text-warning"}`}>{catalog.restartRequired ? "restart required" : catalog.applied ? catalog.compatibility : "next host start"}</span> : null}
+    </div>
+    {catalog ? <>
+      <dl className="grid gap-x-5 gap-y-3 border-b border-border py-3 text-[10px] sm:grid-cols-3">
+        <SettingFact label="Source" value={`${catalog.source} · ${catalog.version} · ${catalog.sha256.slice(0, 12)}`} />
+        <SettingFact label="Codex" value={`${catalog.codexVersion || "unavailable"} · baseline ${catalog.codexBaseline}`} />
+        <SettingFact label="Models" value={`${visibleModels.length} visible · ${catalog.modelCount} total`} />
+      </dl>
+      {catalog.compatibility !== "verified" || catalog.restartRequired ? <div className="border-b border-border bg-warning/5 px-3 py-2 text-[10px] leading-4 text-warning">{catalog.restartRequired ? "The catalog changed after CodexHost started. Restart CodexLoom before relying on the new metadata." : "This catalog snapshot was verified with Codex 0.144.1. Regenerate and test it when the Codex runtime changes."}</div> : null}
+      <div className="divide-y divide-border border-b border-border">
+        {visibleModels.map((model) => <div key={`${model.providerId}:${model.id}`} className="grid min-w-0 gap-1 py-2 sm:grid-cols-[minmax(0,1fr)_7rem_12rem] sm:items-center sm:gap-3">
+          <div className="min-w-0"><div className="truncate text-[11px] font-medium">{model.displayName || model.id}</div><div className="truncate font-mono text-[9px] text-muted-foreground">{model.providerId} · {model.id}</div></div>
+          <span className="font-mono text-[9px] text-muted-foreground">{formatContextWindow(model.contextWindow)}</span>
+          <span className="truncate font-mono text-[9px] text-muted-foreground">{model.reasoningEfforts.length ? model.reasoningEfforts.join(" · ") : "provider default"}</span>
+        </div>)}
+      </div>
+    </> : query.isLoading ? <div className="border-b border-border py-5 text-center text-[10px] text-muted-foreground">Loading model catalog...</div> : null}
+    <div className="mt-6 flex items-center justify-between border-y border-border py-3">
+      <div className="flex items-center gap-2"><Cpu className="size-4 text-primary" /><span className="text-[12px] font-semibold">Configured providers</span></div>
+      <Button size="sm" onClick={() => editProvider()}><Plus />Add provider</Button>
+    </div>
+    <div className="divide-y divide-border border-b border-border">
+      {providers.map((provider) => <div key={provider.id} className="flex min-w-0 items-center gap-3 py-3">
+        <span className={`size-2 shrink-0 rounded-full ${provider.credentialConfigured ? "bg-success" : "bg-warning"}`} />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2"><span className="truncate text-[11.5px] font-semibold">{provider.name}</span>{provider.publicBeta ? <span className="rounded-sm bg-warning/10 px-1.5 py-0.5 font-mono text-[8px] uppercase text-warning">beta</span> : null}</div>
+          <div className="mt-0.5 truncate font-mono text-[9.5px] text-muted-foreground">{provider.id} · {provider.wireApi || "Codex default"} · {provider.credentialSource}</div>
+        </div>
+        {provider.boundAgentCount > 0 ? <span className="font-mono text-[9px] text-muted-foreground">{provider.boundAgentCount} Agent{provider.boundAgentCount === 1 ? "" : "s"}</span> : null}
+        <Button variant="outline" size="icon" onClick={() => void verify(provider.id)} disabled={working} title={`Verify ${provider.name}`} aria-label={`Verify ${provider.name}`}><ShieldCheck /></Button>
+        {provider.source === "custom" ? <Button variant="outline" size="icon" onClick={() => editProvider(provider)} disabled={working} title={`Edit ${provider.name}`} aria-label={`Edit ${provider.name}`}><Settings2 /></Button> : null}
+        {provider.source === "custom" ? <Button variant="outline" size="icon" onClick={() => void disable(provider.id)} disabled={working || provider.boundAgentCount > 0} title={`Disable ${provider.name}`} aria-label={`Disable ${provider.name}`}><Trash2 /></Button> : null}
+      </div>)}
+      {!query.isLoading && providers.length === 0 ? <div className="py-7 text-center text-[11px] text-muted-foreground">No Provider configuration available.</div> : null}
+    </div>
+    {verification && verification.providerId === providerId ? <dl className="mt-4 grid gap-3 border-l-2 border-primary bg-muted/20 px-3 py-2 text-[10px] sm:grid-cols-3"><SettingFact label="Config" value={verification.config} /><SettingFact label="Credential" value={verification.authentication} /><SettingFact label="Request" value={verification.minimalRequest} /></dl> : null}
+    {editing ? <form className="mt-6 border-t border-border pt-5" onSubmit={(event) => { event.preventDefault(); void save(); }}>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="text-[10.5px] font-medium text-muted-foreground">Provider ID<Input value={providerId} onChange={(event) => setProviderId(event.target.value)} disabled={providers.some((provider) => provider.id === providerId)} spellCheck={false} className="mt-1 font-mono text-[11px]" /></label>
+        <label className="text-[10.5px] font-medium text-muted-foreground">Name<Input value={name} onChange={(event) => setName(event.target.value)} spellCheck={false} className="mt-1" /></label>
+        <label className="text-[10.5px] font-medium text-muted-foreground">Base URL<Input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} spellCheck={false} className="mt-1 font-mono text-[11px]" /></label>
+        <label className="text-[10.5px] font-medium text-muted-foreground">Wire API<Input value={wireApi} onChange={(event) => setWireApi(event.target.value)} spellCheck={false} className="mt-1 font-mono text-[11px]" /></label>
+        <label className="text-[10.5px] font-medium text-muted-foreground">API key<Input value={apiKey} onChange={(event) => { setApiKey(event.target.value); if (event.target.value) setEnvKey(""); }} type="password" autoComplete="new-password" spellCheck={false} placeholder="Stored in Codex TOML" className="mt-1 font-mono text-[11px]" /></label>
+        <label className="text-[10.5px] font-medium text-muted-foreground">Environment key<Input value={envKey} onChange={(event) => { setEnvKey(event.target.value); if (event.target.value) setApiKey(""); }} spellCheck={false} placeholder="DEEPSEEK_API_KEY" className="mt-1 font-mono text-[11px]" /></label>
+      </div>
+      <div className="mt-4 flex justify-end gap-2"><Button type="button" variant="outline" onClick={() => setEditing(false)}>Cancel</Button><Button type="submit" disabled={working || !providerId.trim() || !name.trim() || !baseUrl.trim() || !wireApi.trim()}>{working ? <Loader2 className="animate-spin" /> : <Save />}Save Provider</Button></div>
+    </form> : null}
+  </SettingsBody>;
+}
+
+function formatContextWindow(value?: number) {
+  if (!value) return "context unknown";
+  if (value >= 1_000_000) return `${(value / 1_048_576).toFixed(value % 1_048_576 === 0 ? 0 : 1)}M context`;
+  return `${Math.round(value / 1000)}K context`;
 }
 
 function ConnectorSettings({ onOpenExternal, onError }: { onOpenExternal: () => void; onError: (message: string) => void }) {

@@ -2,7 +2,7 @@ import { Activity, Archive, BookOpen, Bot, Cable, ChevronRight, CircleHelp, Circ
 import { lazy, Suspense, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { api, type Agent, type BackupStatus, type HumanRequest, type InboxEntry, type RemoteSnapshot, type Topic } from "./types";
+import { api, type Agent, type BackupStatus, type HumanRequest, type InboxEntry, type ModelProvider, type ModelProviderResponse, type RemoteSnapshot, type TopicSummary } from "./types";
 import { summarizeTask } from "./feed";
 import { BrandLockup, BrandMark } from "./components/BrandMark";
 import { Button } from "./components/ui/button";
@@ -10,6 +10,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "./components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "./components/ui/popover";
 import { publishThreadEvent, threadEventSubscriberCount } from "./thread-events";
+import { globalEventState, subscribeGlobalEvents, subscribeGlobalEventState, type GlobalEventState } from "./global-events";
 import { executionDotClass, executionLabel, isAgentExecuting, isOwnerResultEvent } from "./product-state";
 import { NeedsYouPane } from "./NeedsYouPane";
 import { TopicsPane } from "./TopicsPane";
@@ -481,6 +482,7 @@ function AgentTabs({
                   <dl className="mt-3 grid grid-cols-[58px_minmax(0,1fr)] gap-x-2 gap-y-2 text-[10.5px]">
                     <dt className="text-muted-foreground">Workspace</dt><dd className="min-w-0 truncate font-mono" title={agent.cwd}>{agent.cwd}</dd>
                     <dt className="text-muted-foreground">Thread</dt><dd className="min-w-0 truncate font-mono" title={agent.threadId || undefined}>{agent.threadId || "Not started"}</dd>
+                    <dt className="text-muted-foreground">Provider</dt><dd className="font-mono">{agent.providerId || "openai"}</dd>
                     <dt className="text-muted-foreground">Model</dt><dd className="font-mono">{agent.model || "Default"}</dd>
                     <dt className="text-muted-foreground">Reasoning</dt><dd className="font-mono">{agent.effort === "xhigh" ? "Extra high" : agent.effort || "Default"}</dd>
                     <dt className="text-muted-foreground">Sandbox</dt><dd className="font-mono">{agent.sandbox || "danger-full-access"}</dd>
@@ -519,11 +521,16 @@ export default function App() {
   const queryClient = useQueryClient();
   const agentsQuery = useQuery<{ agents: Agent[] }>({
     queryKey: ["agents"],
-    queryFn: () => api("GET", "/api/agents"),
+    queryFn: () => api("GET", "/api/agents?view=summary"),
   });
   const remoteQuery = useQuery<RemoteSnapshot | null>({
     queryKey: ["remote"],
     queryFn: async () => (await api("GET", "/api/remote")).remote,
+    retry: false,
+  });
+  const providersQuery = useQuery<ModelProviderResponse>({
+    queryKey: ["model-providers"],
+    queryFn: () => api("GET", "/api/model-providers"),
     retry: false,
   });
   const backupQuery = useQuery<BackupStatus>({
@@ -538,16 +545,24 @@ export default function App() {
   });
   const humanRequestsQuery = useQuery<{ requests: HumanRequest[] }>({
     queryKey: ["human-requests"],
-    queryFn: () => api("GET", "/api/human-requests"),
+    queryFn: () => api("GET", "/api/human-requests?state=open"),
     refetchInterval: 30_000,
   });
-  const topicsQuery = useQuery<{ topics: Topic[] }>({
+  const topicsQuery = useQuery<{ topics: TopicSummary[] }>({
     queryKey: ["topics"],
-    queryFn: () => api("GET", "/api/topics"),
+    queryFn: () => api("GET", "/api/topics?view=summary"),
     refetchInterval: 30_000,
   });
   const agents = agentsQuery.data?.agents || [];
   const remote = remoteQuery.data || null;
+  const modelProviders = providersQuery.data?.providers || [];
+  const creatableProviders = providersQuery.data
+    ? modelProviders.filter((provider) => provider.configured && provider.credentialConfigured)
+    : [{
+        id: "openai", name: "OpenAI / ChatGPT login", source: "builtin", configured: true,
+        credentialSource: "codex-auth", credentialConfigured: true, models: [], modelDetails: [], boundAgentCount: 0,
+      } as ModelProvider];
+  const creatableProviderKey = creatableProviders.map((provider) => `${provider.id}:${provider.models.join(",")}`).join("\n");
   const backupStatus = backupQuery.data || { backups: [], dir: "", count: 0, totalBytes: 0, retention: { minCount: 2, maxCount: 5, maxBytes: 2 * 1024 ** 3, maxAgeDays: 30 } };
   const setAgents = (next: Agent[] | ((previous: Agent[]) => Agent[])) => {
     queryClient.setQueryData<{ agents: Agent[] }>(["agents"], (current) => {
@@ -557,6 +572,7 @@ export default function App() {
   };
   const setRemote = (next: RemoteSnapshot | null) => queryClient.setQueryData(["remote"], next);
   const [current, setCurrent] = useState<string | null>(() => sessionStorage.getItem("codexloom-active-agent"));
+  const [liveStreamState, setLiveStreamState] = useState<GlobalEventState>(() => globalEventState());
   const [openAgentIds, setOpenAgentIds] = useState<string[]>(readAgentTabs);
   const [unseenAgentIds, setUnseenAgentIds] = useState<Set<string>>(() => new Set());
   const [view, setView] = useState<"agents" | "needs-you" | "topics" | "inbox" | "integrations" | "messages" | "schedules" | "team" | "status" | "capacity" | "usage" | "settings" | "remote" | "design">("agents");
@@ -574,9 +590,20 @@ export default function App() {
   const [newDisplayName, setNewDisplayName] = useState("");
   const [newCwd, setNewCwd] = useState("");
   const [newDomain, setNewDomain] = useState("");
+  const [newProviderId, setNewProviderId] = useState("openai");
+  const [newModel, setNewModel] = useState("");
+  const [newEffort, setNewEffort] = useState("");
   const [creatingAgent, setCreatingAgent] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [restarting, setRestarting] = useState(false);
+
+  useEffect(() => {
+    if (!newAgentOpen || creatableProviders.length === 0 || creatableProviders.some((provider) => provider.id === newProviderId)) return;
+    const provider = creatableProviders[0];
+    setNewProviderId(provider.id);
+    setNewModel(provider.id === "openai" ? "" : provider.models?.[0] || "");
+    setNewEffort("");
+  }, [creatableProviderKey, newAgentOpen, newProviderId]);
   const [restartStatus, setRestartStatus] = useState<any>({ state: "idle" });
   const [backingUp, setBackingUp] = useState(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout>>(null);
@@ -628,7 +655,7 @@ export default function App() {
 
   const reconcileAgents = async () => {
     try {
-      const snapshot = await api("GET", "/api/agents") as { agents: Agent[] };
+      const snapshot = await api("GET", "/api/agents?view=summary") as { agents: Agent[] };
       setAgents((previous) => mergeAgentSnapshot(previous, snapshot.agents || []));
     } catch {
       /* The live stream reconnects independently; the next reconciliation retries. */
@@ -645,13 +672,8 @@ export default function App() {
 
   // CodexLoom-level live status stream (also delivers the initial snapshot).
   useEffect(() => {
-    const es = new EventSource("/api/events");
-    es.onopen = () => {
-      void reconcileAgents();
-    };
-    es.onmessage = (e) => {
+    return subscribeGlobalEvents((evt) => {
       try {
-        const evt = JSON.parse(e.data);
         if (evt.type === "loom/reconcile") {
           void reconcileAgents();
           void queryClient.invalidateQueries({ queryKey: ["pending-work"] });
@@ -719,6 +741,7 @@ export default function App() {
                       lastError: d.lastError || "",
                       lastTurn: Object.prototype.hasOwnProperty.call(d, "lastTurn") ? d.lastTurn || undefined : s.lastTurn,
                       model: d.model ?? s.model,
+                      providerId: d.providerId ?? s.providerId,
                       effort: d.effort ?? s.effort,
                       sandbox: d.sandbox ?? s.sandbox,
                       approvalPolicy: d.approvalPolicy ?? s.approvalPolicy,
@@ -733,19 +756,17 @@ export default function App() {
       } catch {
         /* ignore */
       }
-    };
-    return () => es.close();
+    });
   }, []);
 
+  useEffect(() => subscribeGlobalEventState(setLiveStreamState), []);
+
   useEffect(() => {
-    const reconcile = () => void reconcileAgents();
-    const timer = window.setInterval(reconcile, 10_000);
     const onVisibilityChange = () => {
-      if (document.visibilityState === "visible") reconcile();
+      if (document.visibilityState === "visible") void reconcileAgents();
     };
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
-      window.clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, []);
@@ -760,9 +781,18 @@ export default function App() {
       showToast("working directory must be an absolute path");
       return;
     }
+    if (!creatableProviders.some((provider) => provider.id === newProviderId)) {
+      showToast("configure and verify a model Provider first");
+      return;
+    }
     setCreatingAgent(true);
     try {
-      const data = await api("POST", "/api/agents", { name: newName.trim(), displayName: newDisplayName.trim(), cwd: newCwd.trim() });
+      const data = await api("POST", "/api/agents", {
+        name: newName.trim(), displayName: newDisplayName.trim(), cwd: newCwd.trim(),
+        providerId: newProviderId === "openai" ? "" : newProviderId,
+        model: newModel.trim(),
+        effort: newEffort,
+      });
       if (newDomain.trim()) {
         await api("PUT", `/api/agents/${encodeURIComponent(data.agent.id)}/profile`, { identity: "", domain: newDomain.trim(), scope: "", expectedVersion: 0 });
       }
@@ -770,6 +800,9 @@ export default function App() {
       setNewDisplayName("");
       setNewCwd("");
       setNewDomain("");
+      setNewProviderId("openai");
+      setNewModel("");
+      setNewEffort("");
       setNewAgentOpen(false);
       await refresh();
       setOpenAgentIds((ids) => (ids.includes(data.agent.id) ? ids : [...ids, data.agent.id]));
@@ -907,7 +940,7 @@ export default function App() {
     if (route === "settings") {
       const params = new URLSearchParams(h.split("?")[1] || "");
       const section = params.get("section") as SettingsSection | null;
-      if (section && ["remote", "connectors", "recovery", "system", "developer"].includes(section)) setSettingsSection(section);
+      if (section && ["remote", "providers", "connectors", "recovery", "system", "developer"].includes(section)) setSettingsSection(section);
       setView("settings");
       hashApplied.current = true;
       return;
@@ -1268,7 +1301,7 @@ export default function App() {
       return window.codexLoom?.state?.();
     };
     root.openSettings = async (section: SettingsSection = "remote") => {
-      if (!["remote", "connectors", "recovery", "system", "developer"].includes(section)) throw new Error(`Unknown settings section: ${section}`);
+      if (!["remote", "providers", "connectors", "recovery", "system", "developer"].includes(section)) throw new Error(`Unknown settings section: ${section}`);
       selectSettings(section);
       await new Promise((resolve) => window.setTimeout(resolve, 50));
       return window.codexLoom?.state?.();
@@ -1378,6 +1411,12 @@ export default function App() {
       >
         <div className="relative flex h-12 shrink-0 items-center border-b border-sidebar-border/80 px-3 md:h-9">
           <div className="min-w-0"><BrandLockup compact /></div>
+          <span
+            role="status"
+            aria-label={`Live updates: ${liveStreamState}`}
+            title={`Live updates: ${liveStreamState}`}
+            className={`ml-2 size-1.5 shrink-0 rounded-full ${liveStreamState === "live" ? "bg-success" : liveStreamState === "paused" ? "bg-muted-foreground/35" : "animate-pulse bg-warning"}`}
+          />
           <Button
             variant="ghost"
             size="icon-sm"
@@ -1505,13 +1544,49 @@ export default function App() {
               {t("shell.workingDirectory")}
               <Input value={newCwd} onChange={(event) => setNewCwd(event.target.value)} placeholder="/absolute/path/to/workspace" spellCheck={false} className="font-mono text-[12px]" />
             </label>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="block space-y-1.5 text-[11px] font-medium text-muted-foreground">
+                Provider
+                <select
+                  value={newProviderId}
+                  onChange={(event) => {
+                    const providerId = event.target.value;
+                    const provider = modelProviders.find((item) => item.id === providerId);
+                    setNewProviderId(providerId);
+                    setNewModel(providerId === "openai" ? "" : provider?.models?.[0] || "");
+                    setNewEffort("");
+                  }}
+                  disabled={creatableProviders.length === 0}
+                  className="h-9 w-full rounded-sm border border-input bg-background px-3 font-mono text-[12px] outline-none focus:border-ring focus:ring-2 focus:ring-ring/15 disabled:opacity-60"
+                >
+                  {creatableProviders.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}
+                </select>
+              </label>
+              <label className="block space-y-1.5 text-[11px] font-medium text-muted-foreground">
+                Model
+                {(modelProviders.find((provider) => provider.id === newProviderId)?.models.length || 0) > 0 ? <select value={newModel} onChange={(event) => { setNewModel(event.target.value); setNewEffort(""); }} className="h-9 w-full rounded-sm border border-input bg-background px-3 font-mono text-[12px] outline-none focus:border-ring focus:ring-2 focus:ring-ring/15">
+                  {newProviderId === "openai" ? <option value="">Codex default</option> : null}
+                  {(modelProviders.find((provider) => provider.id === newProviderId)?.modelDetails || []).map((model) => <option key={model.id} value={model.id}>{model.displayName || model.id}</option>)}
+                </select> : <Input value={newModel} onChange={(event) => setNewModel(event.target.value)} placeholder={newProviderId === "openai" ? "Codex default" : "model id"} spellCheck={false} className="font-mono text-[12px]" />}
+              </label>
+            </div>
+            {(() => {
+              const model = modelProviders.find((provider) => provider.id === newProviderId)?.modelDetails.find((item) => item.id === newModel);
+              if (!model?.reasoningEfforts.length) return null;
+              return <label className="block space-y-1.5 text-[11px] font-medium text-muted-foreground">Thinking effort
+                <select value={newEffort} onChange={(event) => setNewEffort(event.target.value)} className="h-9 w-full rounded-sm border border-input bg-background px-3 font-mono text-[12px] outline-none focus:border-ring focus:ring-2 focus:ring-ring/15">
+                  <option value="">Default ({model.defaultReasoningEffort || "provider"})</option>
+                  {model.reasoningEfforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
+                </select>
+              </label>;
+            })()}
             <label className="block space-y-1.5 text-[11px] font-medium text-muted-foreground">
               {t("shell.domain")} <span className="font-normal text-muted-foreground/70">{t("shell.optional")}</span>
               <textarea value={newDomain} onChange={(event) => setNewDomain(event.target.value)} placeholder={t("shell.domainPlaceholder")} rows={3} className="w-full resize-y rounded-sm border border-input bg-background px-3 py-2 text-[12px] leading-5 outline-none focus:border-ring focus:ring-2 focus:ring-ring/15" />
             </label>
           </div>
           <DialogFooter showCloseButton>
-            <Button onClick={create} disabled={creatingAgent}>{creatingAgent ? <span className="spinner size-3" /> : <Plus />}{creatingAgent ? t("shell.creating") : t("shell.create")}</Button>
+            <Button onClick={create} disabled={creatingAgent || creatableProviders.length === 0}>{creatingAgent ? <span className="spinner size-3" /> : <Plus />}{creatingAgent ? t("shell.creating") : t("shell.create")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -1605,6 +1680,7 @@ export default function App() {
                 <div key={agent.id} className={active ? "flex min-h-0 min-w-0 flex-1" : "hidden"} aria-hidden={!active}>
                   <AgentPane
                     agent={agent}
+                    modelProviders={creatableProviders}
                     active={active}
                     configRequestNonce={configRequest?.agentId === agent.id ? configRequest.nonce : 0}
                     pendingWork={(pendingWorkQuery.data?.entries || []).filter((entry) => entry.item.agentId === agent.id && !["handled", "cancelled"].includes(entry.item.state))}

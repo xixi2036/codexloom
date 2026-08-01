@@ -7,12 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"sort"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/yan5xu/codex-loom/internal/modelcatalog"
 	"github.com/yan5xu/codex-loom/internal/rollout"
 )
 
@@ -36,6 +38,44 @@ func (h *Hub) ListAgents() []AgentView {
 		return out[i].ID < out[j].ID
 	})
 	return out
+}
+
+// ListAgentSummaries returns the live fields needed by the Web workspace
+// without copying unbounded task envelopes or Provider audit history into
+// every reconciliation snapshot. The canonical Agent detail endpoint remains
+// the source for the complete record.
+func (h *Hub) ListAgentSummaries() []AgentView {
+	views := h.ListAgents()
+	for i := range views {
+		views[i].CurrentTask = boundedDisplayTask(views[i].CurrentTask, 320)
+		views[i].ProviderHistory = nil
+		if views[i].LastTurn != nil {
+			last := *views[i].LastTurn
+			last.Task = boundedDisplayTask(last.Task, 320)
+			views[i].LastTurn = &last
+		}
+		if views[i].Goal != nil {
+			goal := *views[i].Goal
+			goal.Objective = boundedDisplayTask(goal.Objective, 320)
+			views[i].Goal = &goal
+		}
+	}
+	return views
+}
+
+func boundedDisplayTask(text string, limit int) string {
+	if strings.TrimSpace(text) == "" {
+		return ""
+	}
+	text = displayUserTask(text)
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return strings.TrimSpace(string(runes[:limit])) + "…"
 }
 
 // ListSessions is the pre-CodexLoom compatibility method.
@@ -84,6 +124,7 @@ type CreateParams struct {
 	Cwd            string `json:"cwd"`
 	Sandbox        string `json:"sandbox"`
 	ApprovalPolicy string `json:"approvalPolicy"`
+	ProviderID     string `json:"providerId"`
 	Model          string `json:"model"`
 	Effort         string `json:"effort"`
 }
@@ -99,6 +140,7 @@ type RestoreAgentParams struct {
 	ThreadID       string `json:"threadId"`
 	Sandbox        string `json:"sandbox"`
 	ApprovalPolicy string `json:"approvalPolicy"`
+	ProviderID     string `json:"providerId"`
 	Model          string `json:"model"`
 	Effort         string `json:"effort"`
 	CreatedAt      string `json:"createdAt"`
@@ -111,6 +153,7 @@ type ConfigParams struct {
 	Effort         *string `json:"effort"`
 	Sandbox        *string `json:"sandbox"`
 	ApprovalPolicy *string `json:"approvalPolicy"`
+	ProviderID     *string `json:"providerId"`
 }
 
 func (h *Hub) CreateAgent(p CreateParams) (AgentView, error) {
@@ -136,11 +179,31 @@ func (h *Hub) CreateAgent(p CreateParams) (AgentView, error) {
 		p.ApprovalPolicy = "never"
 	}
 	p.Model = strings.TrimSpace(p.Model)
-	p.Effort = normalizeEffort(strings.TrimSpace(p.Effort))
-	if p.Effort != "" {
-		if !validEffort(p.Effort) {
-			return AgentView{}, errf(400, "effort must be one of: minimal, low, medium, high, xhigh")
+	p.ProviderID = normalizeProviderID(p.ProviderID)
+	if p.ProviderID != "" && !nameRe.MatchString(p.ProviderID) {
+		return AgentView{}, errf(400, "providerId must match [a-zA-Z0-9_-]+")
+	}
+	if p.ProviderID == deepSeekProviderID && p.Model == "" {
+		p.Model = deepSeekModel
+	}
+	if p.ProviderID != "" && p.Model == "" {
+		return AgentView{}, errf(400, "model is required for a custom Provider")
+	}
+	if p.ProviderID == deepSeekProviderID && p.Model != deepSeekModel {
+		return AgentView{}, errf(400, "DeepSeek Responses currently supports model %s", deepSeekModel)
+	}
+	if p.ProviderID != "" {
+		provider, err := h.GetModelProvider(p.ProviderID)
+		if err != nil {
+			return AgentView{}, err
 		}
+		if !provider.Configured || !provider.CredentialConfigured {
+			return AgentView{}, errf(409, "Provider %s is not ready; configure and verify it before creating an Agent", p.ProviderID)
+		}
+	}
+	p.Effort = normalizeEffort(strings.TrimSpace(p.Effort))
+	if err := validateModelEffort(p.ProviderID, p.Model, p.Effort); err != nil {
+		return AgentView{}, err
 	}
 	idBytes := make([]byte, 4)
 	_, _ = rand.Read(idBytes)
@@ -153,7 +216,7 @@ func (h *Hub) CreateAgent(p CreateParams) (AgentView, error) {
 	}
 	meta := &Agent{
 		ID: id, Name: p.Name, DisplayName: p.DisplayName, Cwd: p.Cwd,
-		Sandbox: p.Sandbox, ApprovalPolicy: p.ApprovalPolicy, Model: p.Model, Effort: p.Effort,
+		Sandbox: p.Sandbox, ApprovalPolicy: p.ApprovalPolicy, ProviderID: p.ProviderID, Model: p.Model, Effort: p.Effort,
 		Status: "idle", CreatedAt: now(), UpdatedAt: now(),
 	}
 	h.agents[id] = meta
@@ -191,7 +254,7 @@ func (h *Hub) CreateAgent(p CreateParams) (AgentView, error) {
 		return AgentView{}, errf(500, "save agent: %s", err)
 	}
 	h.emitLocked(id, "loom/agent-created", map[string]any{
-		"id": id, "name": meta.Name, "displayName": meta.DisplayName, "cwd": meta.Cwd, "threadId": meta.ThreadID,
+		"id": id, "name": meta.Name, "displayName": meta.DisplayName, "cwd": meta.Cwd, "threadId": meta.ThreadID, "providerId": meta.ProviderID,
 	})
 	h.emitStatusLocked(meta, meta.Status)
 	view := h.viewLocked(meta)
@@ -224,8 +287,19 @@ func (h *Hub) RestoreAgent(p RestoreAgentParams) (AgentView, error) {
 		p.ApprovalPolicy = "never"
 	}
 	p.Effort = normalizeEffort(strings.TrimSpace(p.Effort))
-	if p.Effort != "" && !validEffort(p.Effort) {
-		return AgentView{}, errf(400, "effort must be one of: minimal, low, medium, high, xhigh")
+	p.ProviderID = normalizeProviderID(p.ProviderID)
+	p.Model = strings.TrimSpace(p.Model)
+	if p.ProviderID != "" && !nameRe.MatchString(p.ProviderID) {
+		return AgentView{}, errf(400, "providerId must match [a-zA-Z0-9_-]+")
+	}
+	if p.ProviderID == deepSeekProviderID && p.Model == "" {
+		p.Model = deepSeekModel
+	}
+	if p.ProviderID != "" && p.Model == "" {
+		return AgentView{}, errf(400, "model is required for a custom Provider")
+	}
+	if err := validateModelEffort(p.ProviderID, p.Model, p.Effort); err != nil {
+		return AgentView{}, err
 	}
 	if p.CreatedAt == "" {
 		p.CreatedAt = now()
@@ -247,7 +321,7 @@ func (h *Hub) RestoreAgent(p RestoreAgentParams) (AgentView, error) {
 	meta := &Agent{
 		ID: p.ID, Name: p.Name, DisplayName: p.DisplayName, Cwd: p.Cwd, ThreadID: p.ThreadID,
 		Sandbox: p.Sandbox, ApprovalPolicy: p.ApprovalPolicy,
-		Model: p.Model, Effort: p.Effort,
+		ProviderID: p.ProviderID, Model: p.Model, Effort: p.Effort,
 		Status: "idle", CreatedAt: p.CreatedAt, UpdatedAt: now(),
 	}
 	h.agents[p.ID] = meta
@@ -258,7 +332,7 @@ func (h *Hub) RestoreAgent(p RestoreAgentParams) (AgentView, error) {
 		return AgentView{}, errf(500, "save restored agent: %s", err)
 	}
 	h.emitLocked(p.ID, "loom/agent-restored", map[string]any{
-		"id": p.ID, "name": p.Name, "displayName": p.DisplayName, "cwd": p.Cwd, "threadId": p.ThreadID,
+		"id": p.ID, "name": p.Name, "displayName": p.DisplayName, "cwd": p.Cwd, "threadId": p.ThreadID, "providerId": p.ProviderID,
 	})
 	h.emitStatusLocked(meta, meta.Status)
 	return h.viewLocked(meta), nil
@@ -285,6 +359,7 @@ func (h *Hub) UpdateAgentConfig(key string, p ConfigParams) (AgentView, error) {
 	nextEffort := meta.Effort
 	nextSandbox := meta.Sandbox
 	nextApprovalPolicy := meta.ApprovalPolicy
+	nextProviderID := meta.ProviderID
 
 	if p.Name != nil {
 		name := strings.TrimSpace(*p.Name)
@@ -321,14 +396,40 @@ func (h *Hub) UpdateAgentConfig(key string, p ConfigParams) (AgentView, error) {
 	if p.Model != nil {
 		nextModel = strings.TrimSpace(*p.Model)
 	}
+	if p.ProviderID != nil {
+		nextProviderID = normalizeProviderID(*p.ProviderID)
+		if nextProviderID != meta.ProviderID && strings.TrimSpace(meta.ThreadID) != "" {
+			h.mu.Unlock()
+			return AgentView{}, errf(409, "agent %q already has a primary Thread; use the Provider switch operation", meta.Name)
+		}
+	}
+	if nextProviderID != "" && !nameRe.MatchString(nextProviderID) {
+		h.mu.Unlock()
+		return AgentView{}, errf(400, "providerId must match [a-zA-Z0-9_-]+")
+	}
+	if nextProviderID == deepSeekProviderID && nextModel == "" {
+		nextModel = deepSeekModel
+	}
+	if nextProviderID != "" && nextModel == "" {
+		h.mu.Unlock()
+		return AgentView{}, errf(400, "model is required for a custom Provider")
+	}
+	if nextProviderID == deepSeekProviderID && nextModel != deepSeekModel {
+		h.mu.Unlock()
+		return AgentView{}, errf(400, "DeepSeek Responses currently supports model %s", deepSeekModel)
+	}
 	if p.Effort != nil {
 		effort := normalizeEffort(strings.TrimSpace(*p.Effort))
 		if effort == "" || validEffort(effort) {
 			nextEffort = effort
 		} else {
 			h.mu.Unlock()
-			return AgentView{}, errf(400, "effort must be one of: minimal, low, medium, high, xhigh")
+			return AgentView{}, errf(400, "effort must be one of: minimal, low, medium, high, xhigh, max, ultra")
 		}
+	}
+	if err := validateModelEffort(nextProviderID, nextModel, nextEffort); err != nil {
+		h.mu.Unlock()
+		return AgentView{}, err
 	}
 	if p.Sandbox != nil {
 		nextSandbox = strings.TrimSpace(*p.Sandbox)
@@ -342,6 +443,7 @@ func (h *Hub) UpdateAgentConfig(key string, p ConfigParams) (AgentView, error) {
 	meta.Source = "" // editing config adopts an edge mirror into CodexLoom's registry
 	meta.Name = nextName
 	meta.DisplayName = nextDisplayName
+	meta.ProviderID = nextProviderID
 	meta.Model = nextModel
 	meta.Effort = nextEffort
 	meta.Sandbox = nextSandbox
@@ -452,11 +554,45 @@ func normalizeEffort(effort string) string {
 
 func validEffort(effort string) bool {
 	switch effort {
-	case "minimal", "low", "medium", "high", "xhigh":
+	case "minimal", "low", "medium", "high", "xhigh", "max", "ultra":
 		return true
 	default:
 		return false
 	}
+}
+
+func validateModelEffort(providerID, model, effort string) error {
+	if effort == "" {
+		return nil
+	}
+	if !validEffort(effort) {
+		return errf(400, "effort must be one of: minimal, low, medium, high, xhigh, max, ultra")
+	}
+	providerID = normalizePublicProviderID(providerID)
+	snapshot, err := modelcatalog.Describe(os.Getenv("CODEX_LOOM_MODEL_CATALOG"))
+	if err != nil {
+		return errf(500, "read Codex model catalog: %s", err)
+	}
+	for _, candidate := range snapshot.PublicModels() {
+		if candidate.ProviderID != providerID || candidate.ID != model || len(candidate.ReasoningEfforts) == 0 {
+			continue
+		}
+		for _, supported := range candidate.ReasoningEfforts {
+			if effort == supported {
+				return nil
+			}
+		}
+		return errf(400, "effort for model %s must be one of: %s", model, strings.Join(candidate.ReasoningEfforts, ", "))
+	}
+	return nil
+}
+
+func normalizeProviderID(providerID string) string {
+	providerID = strings.TrimSpace(providerID)
+	if providerID == "openai" {
+		return ""
+	}
+	return providerID
 }
 
 type SendResult struct {
@@ -509,6 +645,10 @@ func (h *Hub) sendTaskWithContext(key, text string, artifactIDs []string, inacti
 		h.mu.Unlock()
 		return SendResult{}, errf(409, "CodexLoom is draining for restart")
 	}
+	if h.providerSwitching {
+		h.mu.Unlock()
+		return SendResult{}, errf(409, "CodexLoom is switching an Agent Provider")
+	}
 	meta := h.resolveLocked(key)
 	if meta == nil {
 		h.mu.Unlock()
@@ -536,7 +676,11 @@ func (h *Hub) sendTaskWithContext(key, text string, artifactIDs []string, inacti
 		return SendResult{}, err
 	}
 	agentID := meta.ID
+	providerID := meta.ProviderID
 	h.mu.Unlock()
+	if providerID == deepSeekProviderID && len(artifactIDs) > 0 {
+		return SendResult{}, errf(400, "DeepSeek %s currently supports text input only; remove image and file attachments", deepSeekModel)
+	}
 	artifacts, err := h.resolveThreadArtifacts(agentID, artifactIDs)
 	if err != nil {
 		return SendResult{}, err
@@ -587,6 +731,11 @@ func (h *Hub) sendTaskWithContext(key, text string, artifactIDs []string, inacti
 		h.mu.Unlock()
 		rt.startMu.Unlock()
 		return SendResult{}, errf(409, "CodexLoom is draining for restart")
+	}
+	if h.providerSwitching {
+		h.mu.Unlock()
+		rt.startMu.Unlock()
+		return SendResult{}, errf(409, "CodexLoom is switching an Agent Provider")
 	}
 	meta = h.agents[agentID]
 	if meta == nil {
@@ -707,7 +856,10 @@ func (h *Hub) sendTaskWithContext(key, text string, artifactIDs []string, inacti
 			log.Printf("[codex-loom] save started message handling %s: %v", agentMessageID, err)
 		}
 	}
-	h.emitLocked(agentID, "loom/turn-started", map[string]any{"turnId": turn.turnID, "task": taskText, "source": turn.source, "topicId": topicID})
+	h.emitLocked(agentID, "loom/turn-started", map[string]any{
+		"turnId": turn.turnID, "task": taskText, "source": turn.source, "topicId": topicID,
+		"providerId": publicProviderID(meta.ProviderID), "model": meta.Model,
+	})
 	if topicID != "" {
 		h.recordTopicWorkEventLocked(topicID, TopicEvent{Type: "turn_started", Actor: meta.Name, AgentID: agentID, Agent: meta.Name, Summary: summarizeTopicText(taskText), Ref: &TopicRef{Type: "turn", ID: turn.turnID, Label: meta.Name}, CreatedAt: now()})
 	}

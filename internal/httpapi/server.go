@@ -90,6 +90,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	s.registerSystemRoutes(mux)
+	s.registerModelProviderRoutes(mux)
 	s.registerIntegrationRoutes(mux)
 	s.registerAgentRoutes(mux)
 	s.registerContextRoutes(mux)
@@ -254,7 +255,7 @@ func (s *Server) globalEvents(w http.ResponseWriter, r *http.Request) {
 			replayMax = event.Seq
 		}
 	}
-	agents := s.hub.ListAgents()
+	agents := s.hub.ListAgentSummaries()
 	loomSnapshot, _ := json.Marshal(map[string]any{"agents": agents})
 	writeSSE(w, store.Event{TS: time.Now().UTC().Format(time.RFC3339Nano), Type: "loom/agents", Data: loomSnapshot})
 	legacySnapshot, _ := json.Marshal(map[string]any{"sessions": agents})
@@ -806,8 +807,8 @@ func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		if r.Method == http.MethodOptions {
-			w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Codex-Hub-Admin-Token")
+			w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Codex-Loom-Admin-Token, X-Codex-Hub-Admin-Token")
 			w.WriteHeader(204)
 			return
 		}

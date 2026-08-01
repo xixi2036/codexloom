@@ -2,7 +2,7 @@ import { ArrowDown, ArrowUpRight, BarChart3, CalendarClock, Check, ChevronRight,
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "@/lib/utils";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { api, uploadThreadArtifact, type Agent, type AgentAddress, type AgentProfile, type AgentTokenUsage, type ConversationMembership, type HumanRequest, type InboxEntry, type PlatformConnection, type Schedule, type TeamView, type ThreadGoal, type Trigger } from "./types";
+import { api, uploadThreadArtifact, type Agent, type AgentAddress, type AgentProfile, type AgentTokenUsage, type ConversationMembership, type HumanRequest, type InboxEntry, type ModelProvider, type PlatformConnection, type Schedule, type TeamView, type ThreadGoal, type Trigger } from "./types";
 import { emptyFeed, reduceFeed } from "./feed";
 import type { Block } from "./feed";
 import type { LoomEvent } from "./types";
@@ -13,14 +13,8 @@ import { subscribeThreadEvents } from "./thread-events";
 import { oldestWaitingMs } from "./product-state";
 import { agentLabel } from "./agent-label";
 
-const MODEL_PRESETS = [
-  { value: "", label: "Default (Codex)" },
-  { value: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
-  { value: "gpt-5.6-terra", label: "GPT-5.6 Terra" },
-  { value: "gpt-5.6-luna", label: "GPT-5.6 Luna" },
-];
-
 const CUSTOM_MODEL_VALUE = "__custom";
+const FALLBACK_REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 
 function readableRuntimeError(value: string) {
   const trimmed = value.trim();
@@ -75,6 +69,7 @@ function feedBlockKey(block: Block) {
 
 export function AgentPane({
   agent,
+  modelProviders,
   active,
   configRequestNonce,
   pendingWork,
@@ -89,6 +84,7 @@ export function AgentPane({
   onAgentUpdated,
 }: {
   agent: Agent;
+  modelProviders: ModelProvider[];
   active: boolean;
   configRequestNonce: number;
   pendingWork: InboxEntry[];
@@ -117,8 +113,9 @@ export function AgentPane({
   const [configSection, setConfigSection] = useState<"profile" | "team" | "external" | "triggers" | "runtime" | "usage">("profile");
   const [nameDraft, setNameDraft] = useState(agent.name);
   const [displayNameDraft, setDisplayNameDraft] = useState(agentLabel(agent));
+  const [providerDraft, setProviderDraft] = useState(agent.providerId || "openai");
   const [modelDraft, setModelDraft] = useState(agent.model || "");
-  const [modelCustomOpen, setModelCustomOpen] = useState(isCustomModel(agent.model || ""));
+  const [modelCustomOpen, setModelCustomOpen] = useState(isCustomModel(agent.model || "", agent.providerId, modelProviders));
   const [effortDraft, setEffortDraft] = useState(agent.effort || "");
   const [sandboxDraft, setSandboxDraft] = useState(agent.sandbox || "danger-full-access");
   const [approvalDraft, setApprovalDraft] = useState(agent.approvalPolicy || "never");
@@ -173,6 +170,7 @@ export function AgentPane({
     })),
   ], [feed.approvals, feed.blocks]);
   const feedVirtualizer = useVirtualizer({
+    enabled: active,
     count: feedRows.length,
     getScrollElement: () => feedRef.current,
     getItemKey: (index) => feedRows[index]?.key || index,
@@ -210,6 +208,26 @@ export function AgentPane({
       }, sync ? 180 : 0);
     },
   });
+  useEffect(() => {
+    if (!active) return;
+    let secondFrame = 0;
+    const firstFrame = window.requestAnimationFrame(() => {
+      feedVirtualizer.measure();
+      secondFrame = window.requestAnimationFrame(() => {
+        feedVirtualizer.measure();
+        const el = feedRef.current;
+        if (!el) return;
+        el.dispatchEvent(new Event("scroll"));
+        if ((needsInitialBottomRef.current || stickRef.current) && feedRows.length > 0) {
+          feedVirtualizer.scrollToIndex(feedRows.length - 1, { align: "end" });
+        }
+      });
+    });
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      if (secondFrame) window.cancelAnimationFrame(secondFrame);
+    };
+  }, [active, agent.id, feedRows.length]);
   const measureFeedRow = useCallback((node: HTMLDivElement | null) => {
     feedVirtualizer.measureElement(node);
     if (!node) return;
@@ -249,12 +267,13 @@ export function AgentPane({
   useEffect(() => {
     setNameDraft(agent.name);
     setDisplayNameDraft(agentLabel(agent));
+    setProviderDraft(agent.providerId || "openai");
     setModelDraft(agent.model || "");
-    setModelCustomOpen(isCustomModel(agent.model || ""));
+    setModelCustomOpen(isCustomModel(agent.model || "", agent.providerId, modelProviders));
     setEffortDraft(agent.effort || "");
     setSandboxDraft(agent.sandbox || "danger-full-access");
     setApprovalDraft(agent.approvalPolicy || "never");
-  }, [agent.id, agent.name, agent.displayName, agent.model, agent.effort, agent.sandbox, agent.approvalPolicy]);
+  }, [agent.id, agent.name, agent.displayName, agent.providerId, agent.model, agent.effort, agent.sandbox, agent.approvalPolicy]);
 
   useEffect(() => {
     if (!active || !configRequestNonce) return;
@@ -738,6 +757,15 @@ export function AgentPane({
     }
     setSavingConfig(true);
     try {
+      let updated = agent;
+      if (providerDraft !== (agent.providerId || "openai")) {
+        const switched = await api("POST", `/api/agents/${agent.id}/provider`, {
+          providerId: providerDraft,
+          model: modelDraft.trim(),
+        });
+        updated = switched.agent as Agent;
+        onAgentUpdated(updated);
+      }
       const data = await api("PATCH", `/api/agents/${agent.id}/config`, {
         name: nextName,
         displayName: nextDisplayName,
@@ -746,7 +774,8 @@ export function AgentPane({
         sandbox: sandboxDraft,
         approvalPolicy: approvalDraft,
       });
-      onAgentUpdated(data.agent);
+      updated = data.agent as Agent;
+      onAgentUpdated(updated);
       setConfigOpen(false);
     } catch (err: any) {
       onError(err.message);
@@ -861,7 +890,22 @@ export function AgentPane({
 
   const running = agent.status === "running";
   const heldMessages = pendingWork.filter((entry) => entry.internalMessage?.handlingStatus === "interrupted" || entry.internalMessage?.handlingStatus === "failed");
-  const modelPresetValue = modelCustomOpen || isCustomModel(modelDraft) ? CUSTOM_MODEL_VALUE : modelDraft;
+  const currentProviderId = agent.providerId || "openai";
+  const selectableProviders = modelProviders.some((provider) => provider.id === currentProviderId)
+    ? modelProviders
+    : [{
+        id: currentProviderId, name: currentProviderId, source: "missing", configured: false,
+        credentialSource: "missing", credentialConfigured: false, models: agent.model ? [agent.model] : [], modelDetails: [], boundAgentCount: 1,
+      } as ModelProvider, ...modelProviders];
+  const selectedProvider = selectableProviders.find((provider) => provider.id === providerDraft);
+  const providerModelPresets = [
+    ...(providerDraft === "openai" ? [{ value: "", label: "Default (Codex)" }] : []),
+    ...(selectedProvider?.modelDetails || []).map((model) => ({ value: model.id, label: model.displayName || model.id })),
+  ];
+  const selectedModelDetail = selectedProvider?.modelDetails?.find((model) => model.id === modelDraft);
+  const reasoningEfforts = selectedModelDetail?.reasoningEfforts?.length ? selectedModelDetail.reasoningEfforts : FALLBACK_REASONING_EFFORTS;
+  const modelPresetValue = modelCustomOpen || isCustomModel(modelDraft, providerDraft, selectableProviders) ? CUSTOM_MODEL_VALUE : modelDraft;
+  const providerChanged = providerDraft !== (agent.providerId || "openai");
   const profileDirty = Boolean(
     profile &&
       (identityDraft.trim() !== (profile.identity || "") ||
@@ -981,13 +1025,32 @@ export function AgentPane({
                     />
                   </label>
                   <label className="mb-2 block">
+                    <span className="mb-1 block text-[11px] text-muted-foreground">Provider</span>
+                    <select
+                      value={providerDraft}
+                      onChange={(event) => {
+                        const nextProvider = event.target.value;
+                        const provider = selectableProviders.find((item) => item.id === nextProvider);
+                        const nextModel = nextProvider === "openai" ? "" : provider?.models?.[0] || "";
+                        setProviderDraft(nextProvider);
+                        setModelDraft(nextModel);
+                        setEffortDraft("");
+                        setModelCustomOpen(nextProvider !== "openai" && nextModel === "");
+                      }}
+                      disabled={running}
+                      className="h-8 w-full rounded-md bg-background px-2.5 font-mono text-[12px] outline-none ring-1 ring-border transition focus:ring-ring/25 disabled:opacity-60"
+                    >
+                      {selectableProviders.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}
+                    </select>
+                  </label>
+                  <label className="mb-2 block">
                     <span className="mb-1 block text-[11px] text-muted-foreground">Model</span>
                     <select
                       value={modelPresetValue}
                       onChange={(e) => {
                         if (e.target.value === CUSTOM_MODEL_VALUE) {
                           setModelCustomOpen(true);
-                          if (MODEL_PRESETS.some((option) => option.value === modelDraft)) setModelDraft("");
+                          if (providerModelPresets.some((option) => option.value === modelDraft)) setModelDraft("");
                           return;
                         }
                         setModelCustomOpen(false);
@@ -996,7 +1059,7 @@ export function AgentPane({
                       disabled={running}
                       className="h-8 w-full rounded-md bg-background px-2.5 font-mono text-[12px] outline-none ring-1 ring-border transition placeholder:text-muted-foreground/60 focus:ring-ring/25 disabled:opacity-60"
                     >
-                      {MODEL_PRESETS.map((option) => (
+                      {providerModelPresets.map((option) => (
                         <option key={option.label} value={option.value}>{option.label}</option>
                       ))}
                       <option value={CUSTOM_MODEL_VALUE}>Custom...</option>
@@ -1015,7 +1078,8 @@ export function AgentPane({
                   <label className="mb-2 block">
                     <span className="mb-1 block text-[11px] text-muted-foreground">Thinking Effort</span>
                     <select value={effortDraft} onChange={(e) => setEffortDraft(e.target.value)} disabled={running} className="h-8 w-full rounded-md bg-background px-2.5 font-mono text-[12px] outline-none ring-1 ring-border transition focus:ring-ring/25 disabled:opacity-60">
-                      <option value="">default</option><option value="minimal">minimal</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">extra high</option>
+                      <option value="">default{selectedModelDetail?.defaultReasoningEffort ? ` (${selectedModelDetail.defaultReasoningEffort})` : ""}</option>
+                      {reasoningEfforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
                     </select>
                   </label>
                   <label className="mb-2 block">
@@ -1031,6 +1095,7 @@ export function AgentPane({
                     </select>
                   </label>
                   {running && <div className="mb-2 rounded-md bg-warning/10 px-2 py-1.5 text-[11px] text-warning">Config can be changed after this turn finishes.</div>}
+                  {providerChanged && !running && <div className="mb-2 rounded-md bg-warning/10 px-2 py-1.5 text-[11px] leading-4 text-warning">Switching Provider cold-resumes this primary Thread and briefly restarts the shared Codex runtime. Every Agent must be idle with no pending approval or active Goal.</div>}
                   <div className="flex justify-end gap-2">
                     <button onClick={() => setConfigOpen(false)} className="rounded-md px-2.5 py-1.5 text-[12px] text-muted-foreground transition-colors hover:bg-muted">Cancel</button>
                     <button onClick={saveConfig} disabled={running || savingConfig} className="rounded-md bg-primary px-2.5 py-1.5 text-[12px] font-medium text-primary-foreground transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60">{savingConfig ? "Saving" : "Save"}</button>
@@ -1864,7 +1929,7 @@ function AgentUsagePanel({ usage, loading, onRefresh, onOpenOverview }: { usage:
       <div className="mb-3 flex items-center justify-between border-b border-border pb-2">
         <div>
           <div className="text-[12px] font-medium">Thread token usage</div>
-          <div className="mt-0.5 font-mono text-[9px] text-muted-foreground">7 days · {usage.latestModel || "model unknown"}</div>
+          <div className="mt-0.5 font-mono text-[9px] text-muted-foreground">7 days · {usage.latestProviderId || "provider unknown"} / {usage.latestModel || "model unknown"}</div>
         </div>
         <button onClick={onRefresh} disabled={loading} className="flex size-7 items-center justify-center rounded-md border border-border text-muted-foreground hover:text-foreground" title="Refresh usage" aria-label="Refresh usage">
           <RefreshCw className={`size-3 ${loading ? "animate-spin" : ""}`} />
@@ -1911,8 +1976,8 @@ function AgentUsagePanel({ usage, loading, onRefresh, onOpenOverview }: { usage:
         <div className="mb-2 text-[10px] font-semibold uppercase text-muted-foreground">Models</div>
         <div className="divide-y divide-border border-y border-border">
           {usage.models.map((model) => (
-            <div key={model.model} className="flex items-center justify-between gap-3 py-2 font-mono text-[10px]">
-              <span className="truncate text-foreground">{model.model}</span>
+            <div key={`${model.providerId}:${model.model}`} className="flex items-center justify-between gap-3 py-2 font-mono text-[10px]">
+              <span className="truncate text-foreground">{model.providerId} / {model.model}</span>
               <span className="shrink-0 text-muted-foreground">{compactTokens(model.usage.totalTokens)}</span>
             </div>
           ))}
@@ -1994,6 +2059,8 @@ function MembershipTextarea({ label, value, onChange, rows }: {
   );
 }
 
-function isCustomModel(model: string) {
-  return model !== "" && !MODEL_PRESETS.some((option) => option.value === model);
+function isCustomModel(model: string, providerId?: string, providers: ModelProvider[] = []) {
+  if (model === "") return false;
+  const models = providers.find((provider) => provider.id === (providerId || "openai"))?.models || [];
+  return !models.includes(model);
 }

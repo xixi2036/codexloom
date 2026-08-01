@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/yan5xu/codex-loom/internal/codex"
+	"github.com/yan5xu/codex-loom/internal/modelcatalog"
 	loomskills "github.com/yan5xu/codex-loom/skills"
 )
 
@@ -26,6 +27,7 @@ type codexHostRuntime struct {
 	initErr    error
 	generation uint64
 	bin        string
+	catalogSHA string
 }
 
 type SkillInventorySkill struct {
@@ -55,9 +57,24 @@ func (h *Hub) ensureCodexHostLocked() (*codexHostRuntime, error) {
 	if host := h.codexHost; host != nil && !host.client.Closed() {
 		return host, nil
 	}
+	if h.providerSwitching {
+		return nil, errf(409, "CodexHost is restarting for an Agent Provider switch")
+	}
+	return h.startCodexHostLocked()
+}
+
+func (h *Hub) startCodexHostLocked() (*codexHostRuntime, error) {
+	if host := h.codexHost; host != nil && !host.client.Closed() {
+		return host, nil
+	}
+	catalog, err := h.materializeModelCatalog()
+	if err != nil {
+		return nil, errf(500, "prepare Codex model catalog: %s", err)
+	}
 	client, err := codex.SpawnWithOptions(codex.SpawnOptions{
-		Bin: codexHostBin(),
-		Env: codexHostEnv(),
+		Bin:  codexHostBin(),
+		Env:  codexHostEnv(),
+		Args: modelcatalog.SpawnArgs(catalog.Path),
 	})
 	if err != nil {
 		return nil, errf(500, "spawn CodexHost: %s", err)
@@ -68,6 +85,7 @@ func (h *Hub) ensureCodexHostLocked() (*codexHostRuntime, error) {
 		ready:      make(chan struct{}),
 		generation: h.codexHostGeneration,
 		bin:        codexHostBin(),
+		catalogSHA: catalog.SHA256,
 	}
 	client.OnNotification = func(method string, params json.RawMessage) {
 		h.onHostNotification(host.generation, method, params)
@@ -83,6 +101,14 @@ func (h *Hub) ensureCodexHostLocked() (*codexHostRuntime, error) {
 		return nil, errf(503, "CodexLoom is shutting down")
 	}
 	return host, nil
+}
+
+func (h *Hub) materializeModelCatalog() (modelcatalog.Snapshot, error) {
+	dataDir := filepath.Join(os.TempDir(), "codexloom-runtime")
+	if h.st != nil {
+		dataDir = h.st.Dir()
+	}
+	return modelcatalog.Materialize(dataDir, os.Getenv("CODEX_LOOM_MODEL_CATALOG"))
 }
 
 func codexHostEnv() map[string]string {
@@ -161,7 +187,12 @@ func (h *Hub) initCodexHost(host *codexHostRuntime) {
 		host.client.Close()
 		return
 	}
-	h.hydrateGoals(host)
+	h.mu.Lock()
+	switchingProvider := h.providerSwitching
+	h.mu.Unlock()
+	if !switchingProvider {
+		h.hydrateGoals(host)
+	}
 }
 
 // ReloadSkills forces the shared CodexHost to rebuild its per-Agent skill

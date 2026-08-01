@@ -64,22 +64,25 @@ type TurnSummary struct {
 // execution binding; Profile, links and external addresses remain attached to
 // the Agent even if that binding is migrated later.
 type Agent struct {
-	ID             string       `json:"id"`
-	Name           string       `json:"name"`
-	DisplayName    string       `json:"displayName,omitempty"`
-	Cwd            string       `json:"cwd"`
-	ThreadID       string       `json:"threadId"`
-	Sandbox        string       `json:"sandbox"`
-	ApprovalPolicy string       `json:"approvalPolicy"`
-	Model          string       `json:"model,omitempty"`
-	Effort         string       `json:"effort,omitempty"`
-	Status         string       `json:"status"`
-	CurrentTask    string       `json:"currentTask"`
-	CurrentTurnID  string       `json:"currentTurnId"`
-	LastError      string       `json:"lastError"`
-	LastTurn       *TurnSummary `json:"lastTurn"`
-	CreatedAt      string       `json:"createdAt"`
-	UpdatedAt      string       `json:"updatedAt"`
+	ID                    string                  `json:"id"`
+	Name                  string                  `json:"name"`
+	DisplayName           string                  `json:"displayName,omitempty"`
+	Cwd                   string                  `json:"cwd"`
+	ThreadID              string                  `json:"threadId"`
+	Sandbox               string                  `json:"sandbox"`
+	ApprovalPolicy        string                  `json:"approvalPolicy"`
+	ProviderID            string                  `json:"providerId,omitempty"`
+	Model                 string                  `json:"model,omitempty"`
+	Effort                string                  `json:"effort,omitempty"`
+	Status                string                  `json:"status"`
+	CurrentTask           string                  `json:"currentTask"`
+	CurrentTurnID         string                  `json:"currentTurnId"`
+	LastError             string                  `json:"lastError"`
+	LastTurn              *TurnSummary            `json:"lastTurn"`
+	CreatedAt             string                  `json:"createdAt"`
+	UpdatedAt             string                  `json:"updatedAt"`
+	PendingProviderSwitch *ProviderSwitchBinding  `json:"pendingProviderSwitch,omitempty"`
+	ProviderHistory       []ProviderBindingChange `json:"providerHistory,omitempty"`
 	// Source is "edge" for Agents mirrored read-only from pinix-edge's
 	// registry (they are re-imported each startup and never persisted here);
 	// empty for Agents CodexLoom owns. Starting a Turn promotes an edge mirror
@@ -284,6 +287,7 @@ type Hub struct {
 
 	mu                      sync.Mutex
 	contextCoverageMu       sync.Mutex
+	modelProviderMu         sync.Mutex
 	agents                  map[string]*Agent
 	comms                   map[string]*AgentMessage
 	commOrder               []string
@@ -330,6 +334,7 @@ type Hub struct {
 	stopOnce                sync.Once
 	stopping                bool
 	draining                bool
+	providerSwitching       bool
 	triggerObservations     map[string]struct{}
 	background              sync.WaitGroup
 	workers                 sync.WaitGroup
@@ -400,6 +405,21 @@ func OpenWithOptions(st *store.Store, options OpenOptions) (*Hub, error) {
 	}
 	if h.agents == nil {
 		h.agents = map[string]*Agent{}
+	}
+	providerSwitchRecovered := false
+	for _, meta := range h.agents {
+		if meta.PendingProviderSwitch == nil {
+			continue
+		}
+		meta.PendingProviderSwitch = nil
+		meta.LastError = "an interrupted Provider switch was rolled back to the previous binding"
+		meta.UpdatedAt = now()
+		providerSwitchRecovered = true
+	}
+	if providerSwitchRecovered && !options.Passive {
+		if err := h.persistAgentsLocked(); err != nil {
+			return nil, fmt.Errorf("recover interrupted Provider switch: %w", err)
+		}
 	}
 	if err := h.st.LoadProfiles(&h.profiles); err != nil {
 		return nil, fmt.Errorf("load profiles: %w", err)
@@ -805,6 +825,7 @@ func (h *Hub) emitStatusLocked(meta *Agent, status string) {
 		"effort":         meta.Effort,
 		"sandbox":        meta.Sandbox,
 		"approvalPolicy": meta.ApprovalPolicy,
+		"providerId":     meta.ProviderID,
 		"updatedAt":      meta.UpdatedAt,
 	}
 	data["goal"] = h.goals[meta.ID]
@@ -919,6 +940,7 @@ func (h *Hub) initRuntime(agentID string, rt *runtime) {
 		return
 	}
 	threadID, threadName, sandbox, cwd := meta.ThreadID, agentDisplayName(meta), meta.Sandbox, meta.Cwd
+	providerID, model := effectiveProviderBinding(meta)
 	h.mu.Unlock()
 
 	h.mu.Lock()
@@ -933,9 +955,8 @@ func (h *Hub) initRuntime(agentID string, rt *runtime) {
 		return
 	}
 	startThread := func() error {
-		result, err := rt.client.Request("thread/start", map[string]any{
-			"sandbox": sandbox, "cwd": cwd,
-		}, 30*time.Second)
+		params := threadBindingParams(sandbox, cwd, providerID, model)
+		result, err := rt.client.Request("thread/start", params, 30*time.Second)
 		if err != nil {
 			return err
 		}
@@ -969,7 +990,7 @@ func (h *Hub) initRuntime(agentID string, rt *runtime) {
 		rt.initErr = startThread()
 		return
 	}
-	err := resumeThread(rt.client, threadID, sandbox, cwd)
+	err := resumeThread(rt.client, threadID, sandbox, cwd, providerID, model)
 	if err != nil {
 		msg := strings.ToLower(err.Error())
 		if strings.Contains(msg, "no rollout") || strings.Contains(msg, "not found") {
@@ -984,10 +1005,21 @@ func (h *Hub) initRuntime(agentID string, rt *runtime) {
 	}
 }
 
-func resumeThread(client *codex.Client, threadID, sandbox, cwd string) error {
-	_, err := client.Request("thread/resume", map[string]any{
-		"threadId": threadID, "sandbox": sandbox, "cwd": cwd,
-	}, 60*time.Second)
+func threadBindingParams(sandbox, cwd, providerID, model string) map[string]any {
+	params := map[string]any{"sandbox": sandbox, "cwd": cwd}
+	if providerID = strings.TrimSpace(providerID); providerID != "" {
+		params["modelProvider"] = providerID
+	}
+	if model = strings.TrimSpace(model); model != "" {
+		params["model"] = model
+	}
+	return params
+}
+
+func resumeThread(client *codex.Client, threadID, sandbox, cwd, providerID, model string) error {
+	params := threadBindingParams(sandbox, cwd, providerID, model)
+	params["threadId"] = threadID
+	_, err := client.Request("thread/resume", params, 60*time.Second)
 	return err
 }
 
@@ -1016,11 +1048,12 @@ func (h *Hub) resumeAgentThread(agentID string, rt *runtime) error {
 		return errf(404, "agent vanished")
 	}
 	threadID, sandbox, cwd := meta.ThreadID, meta.Sandbox, meta.Cwd
+	providerID, model := effectiveProviderBinding(meta)
 	h.mu.Unlock()
 	if strings.TrimSpace(threadID) == "" {
 		return errf(409, "agent has no Codex Thread binding")
 	}
-	if err := resumeThread(rt.client, threadID, sandbox, cwd); err != nil {
+	if err := resumeThread(rt.client, threadID, sandbox, cwd, providerID, model); err != nil {
 		return errf(500, "resume Codex Thread: %s", err)
 	}
 	return nil
@@ -1090,12 +1123,20 @@ func displayUserTask(text string) string {
 	if task, ok := displayLoomControlTask(text); ok {
 		return task
 	}
+	managedContext := false
+	if index := strings.Index(text, "<loom_context"); index >= 0 {
+		managedContext = true
+		text = strings.TrimSpace(text[:index])
+	}
 	if index := strings.Index(text, "\n\n<loom_attachments"); index >= 0 {
 		text = strings.TrimSpace(text[:index])
 	} else if strings.HasPrefix(text, "<loom_attachments") {
 		text = ""
 	}
 	if text == "" {
+		if managedContext {
+			return "CodexLoom managed work"
+		}
 		return "Attached files"
 	}
 	return text
