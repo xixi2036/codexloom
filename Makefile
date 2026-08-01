@@ -9,8 +9,12 @@ GO_BUILD := go build -ldflags "$(LDFLAGS)"
 all: build
 
 # Build the React console into internal/webui/dist (embedded by Go).
+# npm ci installs exactly what web/package-lock.json records and never
+# rewrites it; override NPM_INSTALL only when intentionally updating deps.
+NPM_INSTALL ?= npm ci
+
 web:
-	cd web && npm install && npm run build
+	cd web && $(NPM_INSTALL) && npm run build
 
 # Build CodexLoom binaries only after refreshing the WebUI. The WebUI is
 # embedded by Go at compile time, so reversing this dependency publishes a
